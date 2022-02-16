@@ -1,4 +1,4 @@
-module github.com/adakailabs/traceroute
+module github.com/jakemakesstuff/traceroute
 
 go 1.16
 

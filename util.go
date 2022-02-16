@@ -6,14 +6,14 @@ import (
 	"syscall"
 )
 
-func GetLocalIP() (net.IP, error) {
+func GetLocalIP(v6 bool) (net.IP, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return nil, err
 	}
 
 	for _, address := range addrs {
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+		if ipnet, ok := address.(*net.IPNet); ok && (ipnet.IP.To4() == nil) == v6 && !ipnet.IP.IsLoopback() {
 			return ipnet.IP, nil
 		}
 	}

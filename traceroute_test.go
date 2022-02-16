@@ -9,7 +9,7 @@ import (
 )
 
 func getOptions() *TracerouteOptions {
-	ip, err := GetLocalIP()
+	ip, err := GetLocalIP(true)
 	if err != nil {
 		logrus.Fatalf("Unable to get a local IP for testing: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestTraceroute(t *testing.T) {
 	result, err := Traceroute(getOptions())
 
 	if err != nil {
-		t.Error("Error tracerouting: %v", err)
+		t.Errorf("Error tracerouting: %v", err)
 	}
 
 	if len(result.Hops) > result.Opts.MaxTTL {

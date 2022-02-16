@@ -8,7 +8,6 @@ import (
 	"unsafe"
 
 	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 
 	"github.com/sirupsen/logrus"
 )
@@ -18,18 +17,46 @@ func tracerouteProbe(opts *TracerouteOptions, ttl int, timeout *syscall.Timeval)
 
 	// Set up the socket to send packets out on
 	// TODO: switch on probeType
-	sendSocket, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
+	domain := syscall.AF_INET
+	is6 := opts.DestinationAddr.To4() == nil
+	if is6 {
+		domain = syscall.AF_INET6
+	}
+	sendSocket, err := syscall.Socket(domain, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
 	if err != nil {
 		return ProbeResponse{Success: false, Error: err, TTL: ttl}
 	}
 	defer syscall.Close(sendSocket)
 
 	// Set the TTL on the sendSocket
-	syscall.SetsockoptInt(sendSocket, 0x0, syscall.IP_TTL, ttl)
+	if is6 {
+		err = syscall.SetsockoptInt(sendSocket, syscall.SOL_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
+	} else {
+		err = syscall.SetsockoptInt(sendSocket, syscall.SOL_IP, syscall.IP_TTL, ttl)
+	}
+	if err != nil {
+		return ProbeResponse{Success: false, Error: err, TTL: ttl}
+	}
+
 	// Set a timeout on the send socket (so we don't wait forever)
-	syscall.SetsockoptTimeval(sendSocket, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, timeout)
+	err = syscall.SetsockoptTimeval(sendSocket, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, timeout)
+	if err != nil {
+		return ProbeResponse{Success: false, Error: err, TTL: ttl}
+	}
+
+	// set option to enable checksums
+	if is6 {
+		//syscall.SetsockoptInt(sendSocket, syscall.SOL_SOCKET, syscall.IPV6_CHECKSUM, 2)
+	}
+
 	// set option to tell the kernel to give us errors when we call recvmsg
-	err = syscall.SetsockoptInt(sendSocket, syscall.SOL_IP, syscall.IP_RECVERR, 1)
+	solIp := syscall.SOL_IP
+	receverr := syscall.IP_RECVERR
+	if is6 {
+		solIp = syscall.SOL_IPV6
+		receverr = syscall.IPV6_RECVERR
+	}
+	err = syscall.SetsockoptInt(sendSocket, solIp, receverr, 1)
 	if err != nil {
 		logrus.Errorf("error IP_RECVERR: %v", err)
 	}
@@ -47,7 +74,10 @@ func tracerouteProbe(opts *TracerouteOptions, ttl int, timeout *syscall.Timeval)
 	// TODO: switch based on proto
 	// TODO: send some actual bytes based on opts
 	// Send a single null byte packet
-	syscall.Sendto(sendSocket, []byte{0x0}, 0, opts.destSockaddr)
+	err = syscall.Sendto(sendSocket, []byte{0x0}, 0, opts.destSockaddr)
+	if err != nil {
+		return ProbeResponse{Success: false, Error: err, TTL: ttl}
+	}
 
 	var currIP net.IP
 
@@ -69,7 +99,7 @@ func tracerouteProbe(opts *TracerouteOptions, ttl int, timeout *syscall.Timeval)
 		defer syscall.Close(epollfd)
 		epollevent := syscall.EpollEvent{}
 		err = syscall.EpollCtl(epollfd, syscall.EPOLL_CTL_ADD, sendSocket, &epollevent)
-		syscall.EpollWait(epollfd, []syscall.EpollEvent{epollevent}, int(end.Sub(now).Nanoseconds() / int64(time.Millisecond)))
+		syscall.EpollWait(epollfd, []syscall.EpollEvent{epollevent}, int(end.Sub(now).Nanoseconds()/int64(time.Millisecond)))
 
 		var p = make([]byte, 1500)   // TODO: configurable recv size?
 		var oob = make([]byte, 1500) // TODO: configurable recv size?
@@ -85,7 +115,7 @@ func tracerouteProbe(opts *TracerouteOptions, ttl int, timeout *syscall.Timeval)
 		// The beginning of the oob is a cmsghdr, so we need to load that
 		cmsghdr := (*syscall.Cmsghdr)(unsafe.Pointer(&oob[0]))
 		// If this isn't an IP level message, skip it
-		if cmsghdr.Level != syscall.IPPROTO_IP {
+		if cmsghdr.Level != syscall.IPPROTO_IP && cmsghdr.Level != syscall.IPPROTO_IPV6 {
 			continue
 		}
 
@@ -93,8 +123,8 @@ func tracerouteProbe(opts *TracerouteOptions, ttl int, timeout *syscall.Timeval)
 		se := (*SockExtendedErr)(unsafe.Pointer(&oob[syscall.SizeofCmsghdr]))
 
 		// If the message isn't from ICMP-- skip (TODO: not a magic number here!
-		// Number taken from http://lxr.free-electrons.com/source/include/uapi/linux/errqueue.h#L18
-		if se.Origin != 2 {
+		// Numbers taken from https://github.com/torvalds/linux/blob/master/include/uapi/linux/errqueue.h#L30-L31
+		if se.Origin != 2 && se.Origin != 3 {
 			continue
 		}
 
@@ -104,7 +134,7 @@ func tracerouteProbe(opts *TracerouteOptions, ttl int, timeout *syscall.Timeval)
 		case int32(ipv4.ICMPTypeTimeExceeded):
 			src := (*syscall.RawSockaddrInet4)(unsafe.Pointer(&oob[syscall.SizeofCmsghdr+int(unsafe.Sizeof(*se))]))
 			currIP = sockAddrToIP(&syscall.SockaddrInet4{Port: int(src.Port), Addr: src.Addr})
-		case int32(ipv6.ICMPTypeTimeExceeded):
+		default:
 			src := (*syscall.RawSockaddrInet6)(unsafe.Pointer(&oob[syscall.SizeofCmsghdr+int(unsafe.Sizeof(*se))]))
 			currIP = sockAddrToIP(&syscall.SockaddrInet6{Port: int(src.Port), Addr: src.Addr})
 		}
